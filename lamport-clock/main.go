@@ -18,7 +18,18 @@ type message struct {
 	data string
 }
 
+type nodePool struct {
+	aliveCount atomic.Int64
+}
+
+func newNodePool() *nodePool {
+	pool := new(nodePool)
+	pool.aliveCount.Store(0)
+	return pool
+}
+
 type node struct {
+	pool *nodePool
 	id int
 	clockSpeed int
 	l *log.Logger
@@ -31,8 +42,9 @@ type node struct {
 	freezing atomic.Bool
 }
 
-func newNode(id, clockSpeed int, l *log.Logger) *node {
+func newNode(pool *nodePool, id, clockSpeed int, l *log.Logger) *node {
 	n := new(node)
+	n.pool = pool
 	n.id = id
 	n.clockSpeed = clockSpeed
 	n.l = l
@@ -48,6 +60,7 @@ func (n *node) run() {
 
 	// counter increment
 	go func() {
+		n.pool.aliveCount.Add(1)
 		n.l.Printf("Node %d started at %dms clock speed", n.id, n.clockSpeed)
 		for n.running.Load() {
 			for n.freezing.Load() {
@@ -61,6 +74,7 @@ func (n *node) run() {
 			time.Sleep(time.Duration(n.clockSpeed) * time.Millisecond)
 		}
 		n.l.Printf("Node %d shutdown", n.id)
+		n.pool.aliveCount.Add(-1)
 	}()
 
 	// poll messages in separate thread
@@ -97,6 +111,7 @@ func (n *node) time() int64 {
 }
 
 func (n *node) stop() {
+	close(n.msgCh)
 	n.running.Store(false)
 }
 
@@ -141,14 +156,16 @@ func main() {
 	fmt.Printf("Enter number of nodes: ")
 	fmt.Scanf("%d", &nodeCount)
 
+	pool := newNodePool()
+
 	fmt.Println("Starting nodes ...")
 	nodes := make([]*node, nodeCount)
 	for i := range nodes {
 		r, _ := rand.Int(rand.Reader, big.NewInt(500))
 		clockSpeed := int(500 + r.Int64())
-		nodes[i] = newNode(i, clockSpeed, l)
+		nodes[i] = newNode(pool, i, clockSpeed, l)
 
-		go nodes[i].run()
+		nodes[i].run()
 	}
 
 	for {
@@ -176,8 +193,6 @@ func main() {
 			nodes[source].sendMessage(data, nodes[target])
 		} else if cmd == "logs" {
 			bufio.NewReader(strings.NewReader(logBuilder.String())).WriteTo(os.Stdout)
-			fmt.Println()
-
 			logBuilder.Reset()
 		} else if cmd == "freeze" {
 			var node int
@@ -201,5 +216,11 @@ func main() {
 	for i := range nodes {
 		nodes[i].stop()
 	}
+
+	fmt.Println("Waiting for all nodes to shut down")
+	for pool.aliveCount.Load() > 0 {
+	}
+
+	bufio.NewReader(strings.NewReader(logBuilder.String())).WriteTo(os.Stdout)
 }
 
